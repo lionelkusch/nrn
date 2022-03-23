@@ -802,6 +802,8 @@ static Member_func members[] = {
 	"delay", 0,	// these four changed below
 	"weight", 0,
 	"threshold", 0,
+	"path_mpi", nil,
+	"t_synch",0,
 	"x", 0,
 	0, 0
 };
@@ -851,7 +853,7 @@ static void steer_val(void* v) {
 }
 
 static void* cons(Object* o) {
-	NetCon* d;
+  NetCon* d;
 	if (!net_cvode_instance) {
 		hoc_execerror("CVode instance must exist", 0);
 	}
@@ -875,14 +877,22 @@ static void* cons(Object* o) {
 	double thresh = -1.e9; // sentinal value. default is 10 if new PreSyn
 	double delay = 1.;
 	double weight = 0.;
-	
-	if (ifarg(3)) {
-		thresh = *getarg(3);
-		delay = chkarg(4, 0, 1e15);
-		weight = *getarg(5);
+	char *path_mpi = nil;
+  double t_synch = 0.;
+
+  if (ifarg(3)) {
+    if (hoc_is_str_arg(3)) {
+      path_mpi = gargstr(3);
+      printf("path_mpi %s\n", path_mpi);
+      t_synch = *getarg(4);
+    } else {
+      thresh = *getarg(3);
+      delay = chkarg(4, 0, 1e15);
+      weight = *getarg(5);
+    }
 	}
 	d = net_cvode_instance->install_deliver(psrc, srcsec, osrc, otar,
-		thresh, delay, weight);
+		thresh, delay, weight, path_mpi, t_synch);
 	d->obj_ = o;
 	return (void*)d;
 }
@@ -906,6 +916,12 @@ void NetCon_reg() {
 	s = hoc_table_lookup("threshold", nc->u.ctemplate->symtable);
 	s->type = VAR;
 	s->arayinfo = nil;
+	s = hoc_table_lookup("threshold", nc->u.ctemplate->symtable);
+	s->type = VAR;
+	s->arayinfo = nil;
+  s = hoc_table_lookup("t_synch", nc->u.ctemplate->symtable);
+  s->type = STRING;
+  s->arayinfo = nil;
 	s = hoc_table_lookup("weight", nc->u.ctemplate->symtable);
 	s->type = VAR;
 	s->arayinfo = new Arrayinfo;
@@ -4530,7 +4546,7 @@ void NetCvode::structure_change() {
 }
 
 NetCon* NetCvode::install_deliver(double* dsrc, Section* ssrc, Object* osrc,
-	Object* target,	double threshold, double delay, double magnitude
+	Object* target,	double threshold, double delay, double magnitude,  char* path_mpi, double t_synch
     ) {
 	PreSyn* ps = nil;
 	double* psrc = nil;
@@ -4558,7 +4574,10 @@ NetCon* NetCvode::install_deliver(double* dsrc, Section* ssrc, Object* osrc,
 	}
 	if (psrc) {
 		if (!pst_->find(ps, psrc)) {
-			ps = new PreSyn(psrc, osrc, ssrc);
+      ps = new PreSyn(psrc, osrc, ssrc);
+      if (path_mpi) {
+        ps->set_path(path_mpi, t_synch);
+      }
 			ps->hi_ = hoc_l_insertvoid(psl_, ps);
 			pst_->insert(psrc, ps);
 			++pst_cnt_;
@@ -4952,6 +4971,11 @@ PreSyn::PreSyn(double* src, Object* osrc, Section* ssrc) {
 		nrn_notify_when_void_freed(osrc_, this);
 	}
 #endif
+#if NRNMPI
+  path = "";
+  id=0;
+  mpi=false;
+#endif
 }
 
 PreSyn::~PreSyn() {
@@ -4987,6 +5011,14 @@ PreSyn::~PreSyn() {
 		d->src_ = nil;
 	}
 	net_cvode_instance->presyn_disconnect(this);
+#if NRNMPI
+  if (id == 1 and mpi){
+        bool value[ 1 ] = { true };
+        MPI_Send( value, 1, MPI_CXX_BOOL, 0, 0, comm );
+        MPI_Barrier(comm);
+        MPI_Comm_disconnect( &comm );
+    }
+#endif
 }
 
 DiscreteEvent* PreSyn::savestate_save() {
@@ -5068,6 +5100,17 @@ void PreSyn::init() {
 	}
 }
 
+#if NRNMPI
+void PreSyn::set_path(char* path_param, double t_synch_param){
+  t_synch = t_synch_param;
+  path = path_param;
+  id = count_index;
+  count_index++;
+  mpi=true;
+  preparation_MPI();
+}
+#endif
+
 void PreSyn::record_stmt(const char* stmt) {
 	if (stmt_) {
 		delete stmt_;
@@ -5111,7 +5154,76 @@ void PreSyn::record(IvocVect* vec, IvocVect* idvec, int rec_id) {
 #endif
 }
 
+#if NRNMPI
+int PreSyn::count_index{ 1 };
+MPI_Comm PreSyn::comm{ -1 };
+
+void PreSyn::preparation_MPI(){
+  printf("PreSyn::preparation MPI f=%d t=%20.15g id=%d\n", flag_, t,id);
+
+  if (id == 1) {
+    // Create the connection with MPI
+    // 1) take all the ports of the connections
+    // get port and update the list of device only for master
+    // add the link between MPI communicator and the device (devices can share the same MPI communicator)
+    get_port(path, &port_name);
+    printf("port name : %s \n",port_name.c_str());
+    MPI_Comm_connect(port_name.c_str(),
+                     MPI_INFO_NULL,
+                     0,
+                     MPI_COMM_WORLD,
+                     &comm); // should use the status for handle error
+    std::ostringstream msg;
+    msg << "Connect to " << port_name << " from " << path << "\n";
+  }
+}
+
+
+void PreSyn::get_port(const char *path, std::string* port_name )
+{
+  // path of the file : path+label+id+.txt
+  // (file contains only one line with name of the port)
+  std::ostringstream basename;
+  // get the path from the kernel
+  basename << std::string(path);
+
+  // add the id of the device to the path
+  std::cout << basename.rdbuf() << std::endl;
+  std::ifstream file( basename.str() );
+
+  // read the file
+  if ( file.is_open() )
+  {
+    getline( file, *port_name );
+  }
+  file.close();
+}
+
+void PreSyn::check(NrnThread* nt, double tt, double teps) {
+  if (mpi and (fmod (tt,t_synch) <= t_synch)){
+    bool value[ 1 ] = { true };
+	  MPI_Send( value, 1, MPI_CXX_BOOL, 0, id, comm );
+	  // Receive the size of data
+    MPI_Status status_mpi;
+    MPI_Recv( value, 1 , MPI_CXX_BOOL, 0, id, comm, &status_mpi );
+    int value_int [1] = {index_buffer};
+    MPI_Send( value_int, 1 , MPI_INT, 0, id, comm);
+    double value_time [index_buffer];
+    std::copy(buffer, buffer+index_buffer, value_time);
+    MPI_Send( value_time, index_buffer, MPI_DOUBLE, 0, id, comm);
+    index_buffer = 0;
+  }
+  ConditionEvent::check(nt, tt, teps);
+}
+#endif
+
 void PreSyn::record(double tt) {
+#if NRNMPI
+  if (mpi) {
+    buffer[index_buffer] = tt;
+    index_buffer++;
+  }
+#endif
 	if (tvec_) {
 		// need to lock the vector if shared by other PreSyn
 		// since we get here in the thread that manages the

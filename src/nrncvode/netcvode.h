@@ -93,7 +93,7 @@ public:
 	void hoc_event(double, const char* hoc_stmt, Object* ppobj = nil, int reinit = 0, Object* pyact=nil);
 	NetCon* install_deliver(double* psrc, Section* ssrc, Object* osrc,
 		Object* target,	double threshold, double delay,
-		double weight
+		double weight, char* path, double t_synch
 	);
 	void presyn_disconnect(PreSyn*);
 	void check_thresh(NrnThread*);

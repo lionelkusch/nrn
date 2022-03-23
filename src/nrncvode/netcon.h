@@ -21,6 +21,10 @@
 #define STATISTICS(arg) /**/
 #endif
 
+#if NRNMPI
+#include <mpi.h>
+#endif
+
 class PreSyn;
 class PlayRecord;
 class Cvode;
@@ -277,6 +281,14 @@ public:
 	int gid_;
 #if NRNMPI
 	unsigned char localgid_; // compressed gid for spike transfer
+	char *path;
+  std::string port_name;
+  double t_synch;
+  bool mpi;
+  void set_path( char* path_param, double t_synch);
+  void preparation_MPI();
+  static void get_port(const char* path, std::string* port_name);
+  void check(NrnThread*, double sendtime, double teps = 0.0) override;
 #endif
 #if NRN_MUSIC
 	void* music_port_;
@@ -295,6 +307,15 @@ public:
 	static unsigned long presyn_deliver_netcon_;
 	static unsigned long presyn_deliver_direct_;
 	static unsigned long presyn_deliver_ncsend_;
+
+#if NRNMPI
+	private:
+    static int count_index;
+    static MPI_Comm comm;
+    int id=0;
+    double buffer[100];
+    int index_buffer=0;
+#endif
 };
 class PreSynSave : public DiscreteEvent {
 public:
