@@ -5200,7 +5200,7 @@ void PreSyn::get_port(const char *path, std::string* port_name )
 }
 
 void PreSyn::check(NrnThread* nt, double tt, double teps) {
-  if (mpi and (fmod (tt,t_synch) <= t_synch)){
+  if (mpi and (fmod (tt+dt*0.1,t_synch) <= dt) and tt != 0.0){
     bool value[ 1 ] = { true };
 	  MPI_Send( value, 1, MPI_CXX_BOOL, 0, id, comm );
 	  // Receive the size of data
